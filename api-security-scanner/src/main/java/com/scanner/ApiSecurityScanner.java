@@ -1521,7 +1521,7 @@ public final class ApiSecurityScanner {
                 String location = "code:" + loc.display();
                 String key = "SHADOW_API_EXPOSED|" + method + "|" + path + "|" + location;
                 if (seen.add(key)) {
-                    String curl = curlCommand(method, URI.create(baseUrl + path), authHeaders(), null);
+                    String curl = curlCommand(method, baseUrl + path, authHeaders(), null);
                     String detail = String.format(
                             "Shadow / Undocumented API Exposed: Route %s %s implemented in %s:%d was omitted from OpenAPI specification.",
                             method, path, loc.filePath(), loc.lineNumber());
@@ -1541,7 +1541,7 @@ public final class ApiSecurityScanner {
                 String location = "spec:" + ep.path();
                 String key = "ZOMBIE_API_ENDPOINT|" + ep.method() + "|" + ep.path() + "|" + location;
                 if (seen.add(key)) {
-                    String curl = curlCommand(ep.method(), URI.create(baseUrl + ep.path()), authHeaders(), null);
+                    String curl = curlCommand(ep.method(), baseUrl + ep.path(), authHeaders(), null);
                     String detail = String.format(
                             "Zombie / Deprecated API Endpoint: %s %s defined in OpenAPI specification was not located in source code controllers.",
                             ep.method(), ep.path());
@@ -2038,8 +2038,8 @@ public final class ApiSecurityScanner {
     // ------------------------------------------------------------------ curl repro command
 
     /** Builds a POSIX-shell curl command; authorization values are never written out. */
-    static String curlCommand(String method, URI uri, Map<String, String> headers, String body) {
-        StringBuilder sb = new StringBuilder("curl -i -X ").append(method).append(' ').append(shellQuote(uri.toString()));
+    static String curlCommand(String method, String url, Map<String, String> headers, String body) {
+        StringBuilder sb = new StringBuilder("curl -i -X ").append(method).append(' ').append(shellQuote(url));
         for (Map.Entry<String, String> h : headers.entrySet()) {
             String value = h.getKey().equalsIgnoreCase("Authorization") ? maskToken(h.getValue()) : h.getValue();
             sb.append(" -H ").append(shellQuote(h.getKey() + ": " + value));
@@ -2048,6 +2048,10 @@ public final class ApiSecurityScanner {
             sb.append(" -d ").append(shellQuote(body));
         }
         return sb.toString();
+    }
+
+    static String curlCommand(String method, URI uri, Map<String, String> headers, String body) {
+        return curlCommand(method, uri.toString(), headers, body);
     }
 
     private static String maskToken(String authorizationValue) {
