@@ -30,6 +30,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -2259,6 +2260,8 @@ public final class ApiSecurityScanner {
             }
         }
 
+        writeStepSummary(sorted);
+
         if (requests.get() == 0) {
             System.err.println("Error: no request got a response - is the target reachable? (" + baseUrl + ")");
             return 2;
@@ -2333,6 +2336,18 @@ public final class ApiSecurityScanner {
             Files.createDirectories(out.getParent());
         }
         mapper.writerWithDefaultPrettyPrinter().writeValue(out.toFile(), root);
+    }
+
+    private void writeStepSummary(List<Finding> sorted) {
+        String stepSummary = System.getenv("GITHUB_STEP_SUMMARY");
+        if (stepSummary != null && !stepSummary.isBlank()) {
+            try {
+                Path p = Path.of(stepSummary);
+                Files.writeString(p, buildMarkdown(sorted), StandardCharsets.UTF_8,
+                        StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     // ------------------------------------------------------------------ GitHub pull request comment
