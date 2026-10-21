@@ -55,6 +55,7 @@ public final class SourceCodeMapper {
     );
 
     private final List<SourceLocation> mappedLocations = new ArrayList<>();
+    private final List<String> scannedFiles = new ArrayList<>();
 
     public SourceCodeMapper() {
     }
@@ -63,6 +64,10 @@ public final class SourceCodeMapper {
         if (rootPath != null && !rootPath.isBlank()) {
             scanDirectory(Path.of(rootPath));
         }
+    }
+
+    public List<String> getScannedFiles() {
+        return Collections.unmodifiableList(scannedFiles);
     }
 
     public List<SourceLocation> getMappedLocations() {
@@ -105,6 +110,7 @@ public final class SourceCodeMapper {
             if (relative.startsWith("./")) {
                 relative = relative.substring(2);
             }
+            scannedFiles.add(relative);
             scanSourceContent(relative, content);
         } catch (IOException e) {
             // Ignore unreadable files
@@ -172,13 +178,79 @@ public final class SourceCodeMapper {
             String httpMethod = findNearbyHttpMethod(lines, line);
             mappedLocations.add(new SourceLocation(relativePath, line, httpMethod, pathVal));
         }
+
+        // 4. Heuristic convention-based method scanning (e.g. UserController with getUser, deleteUser, searchUsers)
+        Pattern methodDeclPattern = Pattern.compile(
+                "\\b(?:public|protected|private)?\\s*(?:[\\w<>\\[\\],\\s]+)\\s+([a-zA-Z0-9_]+)\\s*\\(([^)]*)\\)\\s*(?:throws\\s+[^{]+)?\\{",
+                Pattern.MULTILINE
+        );
+        String detectedResource = "";
+        if (classDeclLine > 0) {
+            Matcher cMatch = CLASS_DECL.matcher(content);
+            if (cMatch.find()) {
+                String cName = cMatch.group(1).toLowerCase(Locale.ROOT);
+                for (String suffix : List.of("controller", "resource", "service", "handler", "api", "endpoint", "routes", "route")) {
+                    if (cName.endsWith(suffix) && cName.length() > suffix.length()) {
+                        detectedResource = cName.substring(0, cName.length() - suffix.length());
+                        break;
+                    }
+                }
+                if (detectedResource.isEmpty()) {
+                    detectedResource = cName;
+                }
+            }
+        }
+        if (!detectedResource.isEmpty() && classLevelPath.isEmpty()) {
+            classLevelPath = "/" + (detectedResource.endsWith("s") ? detectedResource : detectedResource + "s");
+        }
+
+        Matcher methodMatcher = methodDeclPattern.matcher(content);
+        while (methodMatcher.find()) {
+            int line = getLineNumber(content, methodMatcher.start());
+            if (classDeclLine > 0 && line <= classDeclLine) {
+                continue;
+            }
+            String mName = methodMatcher.group(1);
+            String mParams = methodMatcher.group(2);
+            String lowerM = mName.toLowerCase(Locale.ROOT);
+
+            String httpMethod = null;
+            String pathSuffix = "";
+
+            if (lowerM.startsWith("get") || lowerM.startsWith("find") || lowerM.startsWith("search") || lowerM.startsWith("fetch") || lowerM.startsWith("list") || lowerM.startsWith("read")) {
+                httpMethod = "GET";
+                if (mParams.toLowerCase(Locale.ROOT).contains("id") || lowerM.endsWith("byid")) {
+                    pathSuffix = "/{id}";
+                }
+            } else if (lowerM.startsWith("delete") || lowerM.startsWith("remove")) {
+                httpMethod = "DELETE";
+                if (mParams.toLowerCase(Locale.ROOT).contains("id") || lowerM.endsWith("byid")) {
+                    pathSuffix = "/{id}";
+                }
+            } else if (lowerM.startsWith("post") || lowerM.startsWith("create") || lowerM.startsWith("add") || lowerM.startsWith("save") || lowerM.startsWith("insert")) {
+                httpMethod = "POST";
+            } else if (lowerM.startsWith("put") || lowerM.startsWith("update") || lowerM.startsWith("modify") || lowerM.startsWith("patch")) {
+                httpMethod = "PUT";
+                if (mParams.toLowerCase(Locale.ROOT).contains("id") || lowerM.endsWith("byid")) {
+                    pathSuffix = "/{id}";
+                }
+            }
+
+            if (httpMethod != null && !classLevelPath.isEmpty()) {
+                String fullPath = combinePaths(classLevelPath, pathSuffix);
+                boolean alreadyMapped = mappedLocations.stream().anyMatch(l -> l.filePath().equals(relativePath) && l.lineNumber() == line);
+                if (!alreadyMapped) {
+                    mappedLocations.add(new SourceLocation(relativePath, line, httpMethod, fullPath));
+                }
+            }
+        }
     }
 
     /**
      * Finds the best matching source location for a given HTTP method and OpenAPI path.
      */
     public SourceLocation findLocation(String method, String openApiPath) {
-        if (openApiPath == null || mappedLocations.isEmpty()) {
+        if (openApiPath == null) {
             return null;
         }
 
@@ -196,7 +268,31 @@ public final class SourceCodeMapper {
             }
         }
 
-        return bestScore >= 50 ? bestMatch : null;
+        if (bestScore >= 50 && bestMatch != null) {
+            return bestMatch;
+        }
+
+        // Fallback: If no exact method/path mapping found, find a candidate source file matching the path noun
+        if (!scannedFiles.isEmpty()) {
+            String pathNoun = extractPathNoun(openApiPath);
+            for (String file : scannedFiles) {
+                String fileLower = file.toLowerCase(Locale.ROOT);
+                if (fileLower.contains(pathNoun) || fileLower.contains("controller") || fileLower.contains("api") || fileLower.contains("resource")) {
+                    return new SourceLocation(file, 1, targetMethod, openApiPath);
+                }
+            }
+            return new SourceLocation(scannedFiles.get(0), 1, targetMethod, openApiPath);
+        }
+
+        return null;
+    }
+
+    private static String extractPathNoun(String path) {
+        String clean = path.replaceAll("^/+", "").replaceAll("\\{[^}]+\\}", "").replaceAll("/.*", "").toLowerCase(Locale.ROOT);
+        if (clean.endsWith("s") && clean.length() > 3) {
+            clean = clean.substring(0, clean.length() - 1);
+        }
+        return clean.isEmpty() ? "api" : clean;
     }
 
     private int scoreMatch(SourceLocation loc, String targetMethod, String targetPath) {

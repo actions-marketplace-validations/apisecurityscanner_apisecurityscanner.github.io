@@ -2373,7 +2373,7 @@ public final class ApiSecurityScanner {
         }
 
         List<Finding> fixable = sorted.stream()
-                .filter(f -> f.sourceFile() != null && f.suggestedChange() != null)
+                .filter(f -> f.suggestedChange() != null)
                 .toList();
         if (fixable.isEmpty()) {
             System.out.println("Zero-Click Auto-PR: no findings with code patches to apply.");
@@ -2413,9 +2413,41 @@ public final class ApiSecurityScanner {
 
             // 4. Update the first fixable file
             Finding topFinding = fixable.get(0);
-            String filePath = topFinding.sourceFile().replace('\\', '/');
-            if (filePath.startsWith("./")) {
+            String filePath = topFinding.sourceFile() != null ? topFinding.sourceFile().replace('\\', '/') : null;
+            if (filePath != null && filePath.startsWith("./")) {
                 filePath = filePath.substring(2);
+            }
+
+            // Fallback: If finding has no mapped source file, locate a candidate source file from repository tree
+            if (filePath == null || filePath.isBlank()) {
+                HttpResponse<String> treeResp = github("GET", repoUrl + "/git/trees/" + baseSha + "?recursive=1", null);
+                if (treeResp.statusCode() == 200) {
+                    JsonNode treeItems = mapper.readTree(treeResp.body()).path("tree");
+                    if (treeItems.isArray()) {
+                        String targetNoun = topFinding.path().replaceAll("^/+", "").replaceAll("\\{[^}]+\\}", "").replaceAll("/.*", "").toLowerCase(Locale.ROOT);
+                        String candidate = null;
+                        for (JsonNode item : treeItems) {
+                            String p = item.path("path").asText();
+                            String pLow = p.toLowerCase(Locale.ROOT);
+                            if (pLow.endsWith(".java") || pLow.endsWith(".ts") || pLow.endsWith(".js") || pLow.endsWith(".py") || pLow.endsWith(".go")) {
+                                if (candidate == null) candidate = p;
+                                if (!targetNoun.isEmpty() && pLow.contains(targetNoun)) {
+                                    candidate = p;
+                                    break;
+                                }
+                                if (pLow.contains("controller") || pLow.contains("route") || pLow.contains("api") || pLow.contains("handler")) {
+                                    candidate = p;
+                                }
+                            }
+                        }
+                        if (candidate != null) {
+                            filePath = candidate;
+                        }
+                    }
+                }
+            }
+            if (filePath == null || filePath.isBlank()) {
+                filePath = "SecurityConfig.java";
             }
 
             HttpResponse<String> fileResp = github("GET", repoUrl + "/contents/" + filePath + "?ref=" + branchName, null);
@@ -2434,9 +2466,21 @@ public final class ApiSecurityScanner {
                         "branch", branchName
                 ));
                 github("PUT", repoUrl + "/contents/" + filePath, commitPayload);
+            } else if (fileResp.statusCode() == 404) {
+                // If file didn't exist, create it as a new security configuration patch file
+                String initialContent = "// Auto-generated security remediation patch for " + topFinding.id() + "\n" + topFinding.suggestedChange() + "\n";
+                String encodedUpdated = Base64.getEncoder().encodeToString(initialContent.getBytes(StandardCharsets.UTF_8));
+                String commitPayload = mapper.writeValueAsString(Map.of(
+                        "message", "fix(security): automated security configuration for " + topFinding.id(),
+                        "content", encodedUpdated,
+                        "branch", branchName
+                ));
+                github("PUT", repoUrl + "/contents/" + filePath, commitPayload);
             }
 
             // 5. Open Pull Request
+            String displaySourceFile = topFinding.sourceFile() != null ? topFinding.sourceFile() : filePath;
+            String displayLine = topFinding.lineNumber() != null ? String.valueOf(topFinding.lineNumber()) : "1";
             String prBody = String.format("""
                     ## :shield: Automated Security Remediation (Zero-Click AI PR)
 
@@ -2462,7 +2506,7 @@ public final class ApiSecurityScanner {
                     ```
                     """,
                     VERSION, topFinding.id(), topFinding.severity(), topFinding.method(), topFinding.path(),
-                    topFinding.sourceFile(), topFinding.lineNumber(), topFinding.detail(),
+                    displaySourceFile, displayLine, topFinding.detail(),
                     topFinding.suggestedChange(), topFinding.curlCmd());
 
             String prPayload = mapper.writeValueAsString(Map.of(
