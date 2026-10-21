@@ -2522,6 +2522,12 @@ public final class ApiSecurityScanner {
                 System.out.println("Zero-Click Auto-PR created successfully: " + prHtmlUrl);
             } else {
                 System.out.println("Zero-Click Auto-PR failed: HTTP " + prResp.statusCode() + " " + prResp.body());
+                if (prResp.body() != null && prResp.body().contains("not permitted to create or approve pull requests")) {
+                    System.out.println("  💡 Tip: Enable 'Allow GitHub Actions to create and approve pull requests' in:");
+                    System.out.println("     Settings -> Actions -> General -> Workflow permissions");
+                    System.out.println("  🚀 Branch with fixes is already created: " + branchName);
+                    System.out.println("     Compare & Merge link: https://github.com/" + gh.repo() + "/compare/" + branchName + "?expand=1");
+                }
             }
         } catch (Exception e) {
             System.out.println("Zero-Click Auto-PR error: " + e.getMessage());
