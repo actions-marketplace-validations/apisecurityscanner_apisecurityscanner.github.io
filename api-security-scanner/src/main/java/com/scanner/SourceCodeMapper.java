@@ -123,7 +123,7 @@ public final class SourceCodeMapper {
         }
 
         try {
-            Files.walkFileTree(root, EnumSet.of(FileVisitOption.FOLLOW_LINKS), MAX_WALK_DEPTH, new SimpleFileVisitor<>() {
+            Files.walkFileTree(root, EnumSet.noneOf(FileVisitOption.class), MAX_WALK_DEPTH, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
                     Path fileName = dir.getFileName();
@@ -159,11 +159,10 @@ public final class SourceCodeMapper {
 
                 @Override
                 public FileVisitResult visitFileFailed(Path file, IOException exc) {
-                    // Gracefully continue on unreadable files, locked files or cyclic symlinks
                     return FileVisitResult.CONTINUE;
                 }
             });
-        } catch (IOException e) {
+        } catch (Throwable e) {
             System.out.println("  ! Source scan error on " + root + ": " + e.getMessage());
         }
     }

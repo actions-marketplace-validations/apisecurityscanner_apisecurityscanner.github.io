@@ -24,4 +24,4 @@ LABEL org.opencontainers.image.version="1.2.0"
 # (a non-root user could not read the spec or write the JSON/SARIF report there).
 COPY --from=build /build/target/api-security-scanner.jar /app/api-security-scanner.jar
 
-ENTRYPOINT ["java", "-XX:+UseG1GC", "-XX:+ExitOnOutOfMemoryError", "-XX:MaxRAMPercentage=75.0", "-jar", "/app/api-security-scanner.jar"]
+ENTRYPOINT ["java", "-jar", "/app/api-security-scanner.jar"]

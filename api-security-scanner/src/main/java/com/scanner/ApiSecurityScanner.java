@@ -2409,6 +2409,11 @@ public final class ApiSecurityScanner {
         if (!cfg.autoPr() || cfg.airGapped()) {
             return;
         }
+        LicenseValidator.LicenseStatus licenseStatus = LicenseValidator.validate(cfg.licenseKey(), cfg.licenseServerUrl(), cfg.airGapped());
+        if (!licenseStatus.isFeatureAllowed("AUTO_PR_BOT")) {
+            System.out.println("Zero-Click Auto-PR: skipped (license plan '" + licenseStatus.tier() + "' does not include automated PR creation).");
+            return;
+        }
         GithubConfig gh = cfg.github();
         if (gh == null || gh.token() == null || gh.repo() == null) {
             System.out.println("Zero-Click Auto-PR: enabled, but GitHub token or repo missing. Skipping auto PR creation.");
