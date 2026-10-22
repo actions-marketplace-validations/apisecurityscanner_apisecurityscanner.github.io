@@ -30,6 +30,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -252,6 +253,10 @@ public final class ApiSecurityScanner {
     }
 
     // ------------------------------------------------------------------ state
+
+    private static final int MAX_GLOBAL_FINDINGS = 5_000;
+    private static final int MAX_FINDINGS_PER_ENDPOINT = 15;
+    private final Map<String, AtomicInteger> endpointFindingsCount = new ConcurrentHashMap<>();
 
     private final Config cfg;
     private final HttpClient client;
@@ -728,40 +733,44 @@ public final class ApiSecurityScanner {
         AtomicInteger endpointIndex = new AtomicInteger(0);
         int total = endpoints.size();
 
-        if (cfg.concurrency() > 1 && total > 1) {
-            ExecutorService pool = Executors.newFixedThreadPool(cfg.concurrency());
-            for (Endpoint ep : endpoints) {
-                pool.submit(() -> {
-                    int idx = endpointIndex.incrementAndGet();
-                    System.out.printf("[%d/%d] %s%n", idx, total, ep.label());
-                    try {
-                        testAuthBypass(ep);
-                        testCors(ep);
-                        testInjection(ep);
-                        testBola(ep);
-                        testXss(ep);
-                        testSecurityHeaders(ep);
-                        testSsrf(ep);
-                        testPathTraversal(ep);
-                        testCommandInjection(ep);
-                        testSsti(ep);
-                        testOpenRedirect(ep);
-                        testNosqlInjection(ep);
-                        testLlmSecurity(ep);
-                    } catch (RuntimeException e) {
-                        System.out.println("  ! skipped " + ep.label() + " after error: " + e);
-                    }
-                });
-            }
-            pool.shutdown();
+        int concurrency = Math.min(Math.max(1, cfg.concurrency()), 32);
+        if (concurrency > 1 && total > 1) {
+            ExecutorService pool = Executors.newFixedThreadPool(concurrency);
             try {
-                if (!pool.awaitTermination(30, TimeUnit.MINUTES)) {
-                    System.err.println("Warning: scan timed out waiting for concurrent tasks to finish.");
+                for (Endpoint ep : endpoints) {
+                    pool.submit(() -> {
+                        int idx = endpointIndex.incrementAndGet();
+                        System.out.printf("[%d/%d] %s%n", idx, total, ep.label());
+                        try {
+                            testAuthBypass(ep);
+                            testCors(ep);
+                            testInjection(ep);
+                            testBola(ep);
+                            testXss(ep);
+                            testSecurityHeaders(ep);
+                            testSsrf(ep);
+                            testPathTraversal(ep);
+                            testCommandInjection(ep);
+                            testSsti(ep);
+                            testOpenRedirect(ep);
+                            testNosqlInjection(ep);
+                            testLlmSecurity(ep);
+                        } catch (Throwable e) {
+                            System.out.println("  ! skipped " + ep.label() + " after error: " + e.getMessage());
+                        }
+                    });
+                }
+            } finally {
+                pool.shutdown();
+                try {
+                    if (!pool.awaitTermination(60, TimeUnit.MINUTES)) {
+                        System.err.println("Warning: scan timed out waiting for concurrent tasks to finish.");
+                        pool.shutdownNow();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                     pool.shutdownNow();
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                pool.shutdownNow();
             }
         } else {
             for (Endpoint ep : endpoints) {
@@ -1977,7 +1986,15 @@ public final class ApiSecurityScanner {
                 }
 
                 long start = System.nanoTime();
-                HttpResponse<String> res = client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+                HttpResponse<String> res;
+                try {
+                    res = client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+                } catch (OutOfMemoryError oom) {
+                    System.gc();
+                    failedRequests.incrementAndGet();
+                    System.out.println("  ! memory warning on " + ep.label() + " response: body skipped to preserve heap.");
+                    return null;
+                }
                 long durationMs = (System.nanoTime() - start) / 1_000_000L;
                 requests.incrementAndGet();
 
@@ -2019,6 +2036,10 @@ public final class ApiSecurityScanner {
             Thread.currentThread().interrupt();
             failedRequests.incrementAndGet();
             return null;
+        } catch (Throwable t) {
+            failedRequests.incrementAndGet();
+            System.out.println("  ! unexpected error (" + method + " " + uri.getPath() + "): " + t.getMessage());
+            return null;
         }
     }
 
@@ -2045,7 +2066,8 @@ public final class ApiSecurityScanner {
             sb.append(" -H ").append(shellQuote(h.getKey() + ": " + value));
         }
         if (body != null) {
-            sb.append(" -d ").append(shellQuote(body));
+            String safeBody = body.length() > 1024 ? body.substring(0, 1024) + "... [truncated]" : body;
+            sb.append(" -d ").append(shellQuote(safeBody));
         }
         return sb.toString();
     }
@@ -2178,6 +2200,13 @@ public final class ApiSecurityScanner {
         if (!seen.add(key)) {
             return;
         }
+        if (findings.size() >= MAX_GLOBAL_FINDINGS) {
+            return; // Enterprise global memory protection against report explosion
+        }
+        AtomicInteger epCount = endpointFindingsCount.computeIfAbsent(ep.label(), k -> new AtomicInteger(0));
+        if (epCount.incrementAndGet() > MAX_FINDINGS_PER_ENDPOINT && severity.ordinal() < Severity.HIGH.ordinal()) {
+            return; // Throttle excessive low/medium noise on heavily vulnerable single endpoints
+        }
 
         SourceLocation src = sourceMapper != null ? sourceMapper.findLocation(ep.method(), ep.path()) : null;
         String sourceFile = src != null ? src.filePath() : null;
@@ -2230,6 +2259,8 @@ public final class ApiSecurityScanner {
                 System.err.println("Failed to write HTML report: " + e.getMessage());
             }
         }
+
+        writeStepSummary(sorted);
 
         if (requests.get() == 0) {
             System.err.println("Error: no request got a response - is the target reachable? (" + baseUrl + ")");
@@ -2307,6 +2338,18 @@ public final class ApiSecurityScanner {
         mapper.writerWithDefaultPrettyPrinter().writeValue(out.toFile(), root);
     }
 
+    private void writeStepSummary(List<Finding> sorted) {
+        String stepSummary = System.getenv("GITHUB_STEP_SUMMARY");
+        if (stepSummary != null && !stepSummary.isBlank()) {
+            try {
+                Path p = Path.of(stepSummary);
+                Files.writeString(p, buildMarkdown(sorted), StandardCharsets.UTF_8,
+                        StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ GitHub pull request comment
 
     /**
@@ -2366,6 +2409,11 @@ public final class ApiSecurityScanner {
         if (!cfg.autoPr() || cfg.airGapped()) {
             return;
         }
+        LicenseValidator.LicenseStatus licenseStatus = LicenseValidator.validate(cfg.licenseKey(), cfg.licenseServerUrl(), cfg.airGapped());
+        if (!licenseStatus.isFeatureAllowed("AUTO_PR_BOT")) {
+            System.out.println("Zero-Click Auto-PR: skipped (license plan '" + licenseStatus.tier() + "' does not include automated PR creation).");
+            return;
+        }
         GithubConfig gh = cfg.github();
         if (gh == null || gh.token() == null || gh.repo() == null) {
             System.out.println("Zero-Click Auto-PR: enabled, but GitHub token or repo missing. Skipping auto PR creation.");
@@ -2373,7 +2421,7 @@ public final class ApiSecurityScanner {
         }
 
         List<Finding> fixable = sorted.stream()
-                .filter(f -> f.sourceFile() != null && f.suggestedChange() != null)
+                .filter(f -> f.suggestedChange() != null)
                 .toList();
         if (fixable.isEmpty()) {
             System.out.println("Zero-Click Auto-PR: no findings with code patches to apply.");
@@ -2413,9 +2461,64 @@ public final class ApiSecurityScanner {
 
             // 4. Update the first fixable file
             Finding topFinding = fixable.get(0);
-            String filePath = topFinding.sourceFile().replace('\\', '/');
-            if (filePath.startsWith("./")) {
+            String filePath = topFinding.sourceFile() != null ? topFinding.sourceFile().replace('\\', '/') : null;
+            if (filePath != null && filePath.startsWith("./")) {
                 filePath = filePath.substring(2);
+            }
+
+            // Fallback: If finding has no mapped source file, locate a candidate source file from local scanned files
+            if (filePath == null || filePath.isBlank()) {
+                if (sourceMapper != null && !sourceMapper.getScannedFiles().isEmpty()) {
+                    String targetNoun = topFinding.path().replaceAll("^/+", "").replaceAll("\\{[^}]+\\}", "").replaceAll("/.*", "").toLowerCase(Locale.ROOT);
+                    for (String p : sourceMapper.getScannedFiles()) {
+                        String pLow = p.toLowerCase(Locale.ROOT);
+                        if (!targetNoun.isEmpty() && pLow.contains(targetNoun)) {
+                            filePath = p;
+                            break;
+                        }
+                        if (pLow.contains("controller") || pLow.contains("route") || pLow.contains("api") || pLow.contains("handler")) {
+                            filePath = p;
+                        }
+                    }
+                    if (filePath == null) {
+                        filePath = sourceMapper.getScannedFiles().get(0);
+                    }
+                }
+            }
+
+            // Remote fallback if local scan had zero candidate files
+            if (filePath == null || filePath.isBlank()) {
+                try {
+                    HttpResponse<String> treeResp = github("GET", repoUrl + "/git/trees/" + baseSha + "?recursive=1", null);
+                    if (treeResp.statusCode() == 200) {
+                        JsonNode treeItems = mapper.readTree(treeResp.body()).path("tree");
+                        if (treeItems.isArray()) {
+                            String targetNoun = topFinding.path().replaceAll("^/+", "").replaceAll("\\{[^}]+\\}", "").replaceAll("/.*", "").toLowerCase(Locale.ROOT);
+                            String candidate = null;
+                            for (JsonNode item : treeItems) {
+                                String p = item.path("path").asText();
+                                String pLow = p.toLowerCase(Locale.ROOT);
+                                if (pLow.endsWith(".java") || pLow.endsWith(".ts") || pLow.endsWith(".js") || pLow.endsWith(".py") || pLow.endsWith(".go")) {
+                                    if (candidate == null) candidate = p;
+                                    if (!targetNoun.isEmpty() && pLow.contains(targetNoun)) {
+                                        candidate = p;
+                                        break;
+                                    }
+                                    if (pLow.contains("controller") || pLow.contains("route") || pLow.contains("api") || pLow.contains("handler")) {
+                                        candidate = p;
+                                    }
+                                }
+                            }
+                            if (candidate != null) {
+                                filePath = candidate;
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            if (filePath == null || filePath.isBlank()) {
+                filePath = "SecurityConfig.java";
             }
 
             HttpResponse<String> fileResp = github("GET", repoUrl + "/contents/" + filePath + "?ref=" + branchName, null);
@@ -2434,9 +2537,21 @@ public final class ApiSecurityScanner {
                         "branch", branchName
                 ));
                 github("PUT", repoUrl + "/contents/" + filePath, commitPayload);
+            } else if (fileResp.statusCode() == 404) {
+                // If file didn't exist, create it as a new security configuration patch file
+                String initialContent = "// Auto-generated security remediation patch for " + topFinding.id() + "\n" + topFinding.suggestedChange() + "\n";
+                String encodedUpdated = Base64.getEncoder().encodeToString(initialContent.getBytes(StandardCharsets.UTF_8));
+                String commitPayload = mapper.writeValueAsString(Map.of(
+                        "message", "fix(security): automated security configuration for " + topFinding.id(),
+                        "content", encodedUpdated,
+                        "branch", branchName
+                ));
+                github("PUT", repoUrl + "/contents/" + filePath, commitPayload);
             }
 
             // 5. Open Pull Request
+            String displaySourceFile = topFinding.sourceFile() != null ? topFinding.sourceFile() : filePath;
+            String displayLine = topFinding.lineNumber() != null ? String.valueOf(topFinding.lineNumber()) : "1";
             String prBody = String.format("""
                     ## :shield: Automated Security Remediation (Zero-Click AI PR)
 
@@ -2462,7 +2577,7 @@ public final class ApiSecurityScanner {
                     ```
                     """,
                     VERSION, topFinding.id(), topFinding.severity(), topFinding.method(), topFinding.path(),
-                    topFinding.sourceFile(), topFinding.lineNumber(), topFinding.detail(),
+                    displaySourceFile, displayLine, topFinding.detail(),
                     topFinding.suggestedChange(), topFinding.curlCmd());
 
             String prPayload = mapper.writeValueAsString(Map.of(
@@ -2478,6 +2593,12 @@ public final class ApiSecurityScanner {
                 System.out.println("Zero-Click Auto-PR created successfully: " + prHtmlUrl);
             } else {
                 System.out.println("Zero-Click Auto-PR failed: HTTP " + prResp.statusCode() + " " + prResp.body());
+                if (prResp.body() != null && prResp.body().contains("not permitted to create or approve pull requests")) {
+                    System.out.println("  💡 Tip: Enable 'Allow GitHub Actions to create and approve pull requests' in:");
+                    System.out.println("     Settings -> Actions -> General -> Workflow permissions");
+                    System.out.println("  🚀 Branch with fixes is already created: " + branchName);
+                    System.out.println("     Compare & Merge link: https://github.com/" + gh.repo() + "/compare/" + branchName + "?expand=1");
+                }
             }
         } catch (Exception e) {
             System.out.println("Zero-Click Auto-PR error: " + e.getMessage());

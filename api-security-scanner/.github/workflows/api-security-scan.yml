@@ -1,24 +1,54 @@
-name: API Security Scan
+name: API Security Scan & Compliance
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
 
 permissions:
   contents: read
-  pull-requests: write   # lets the scanner post its findings as a PR comment
+  pull-requests: write   # Lets the scanner create Auto-PRs and post findings as PR comments
+  security-events: write # Lets the scanner publish alerts into GitHub 'Security -> Code scanning'
+  actions: read
 
 jobs:
   scan:
+    name: DAST + SAST Hybrid Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
       - name: Run API Security Scanner
-        uses: ./
+        uses: apisecurityscanner/apisecurityscanner.github.io@v1.0.0
         with:
           spec: openapi.json
-          base-url: https://staging.example.com      # must be reachable from the runner
+          base-url: https://staging.example.com
           auth-token: ${{ secrets.API_TOKEN }}
-          methods: GET                               # read-only scan; add POST,PUT,DELETE only on a test system
+          license-key: ${{ secrets.SCANNER_LICENSE_KEY }}
+          auto-pr: true
           fail-on: high
+          output: scan-report.json
+          sarif-output: scan-report.sarif
+          html-output: scan-report.html
+
+      # 1. Downloadable Artifacts (HTML, SARIF, JSON) visible on Actions Run page
+      - name: Upload Security Reports as Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: api-security-reports
+          path: |
+            scan-report.html
+            scan-report.sarif
+            scan-report.json
+          retention-days: 30
+
+      # 2. Upload SARIF to GitHub 'Security' -> 'Code scanning alerts' Tab
+      - name: Upload SARIF to GitHub Security Tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: scan-report.sarif
+          category: api-security-scanner

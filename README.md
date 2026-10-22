@@ -63,15 +63,43 @@ java -jar target/api-security-scanner.jar --spec openapi.json --base-url http://
 ### 2. GitHub Actions Integration (`.github/workflows/security.yml`)
 Add this step to your pipeline:
 ```yaml
-- name: Run API Security Scanner
-  uses: KarimovAlamdar/api-security-scanner@v1
-  with:
-    spec: openapi.json
-    base-url: https://staging.api.company.com
-    auth-token: ${{ secrets.API_TOKEN }}
-    license-key: ${{ secrets.SCANNER_LICENSE_KEY }} # Unlocks Auto-PR & Stateful BOLA
-    auto-pr: true                                   # Opens automated PRs with remediations
-    fail-on: high
+permissions:
+  contents: read
+  pull-requests: write     # Opens automated PRs with remediations
+  security-events: write   # Uploads alerts to GitHub 'Security' tab
+
+steps:
+  - uses: actions/checkout@v4
+
+  - name: Run API Security Scanner
+    uses: apisecurityscanner/apisecurityscanner.github.io@v1.0.0
+    with:
+      spec: openapi.json
+      base-url: https://staging.api.company.com
+      auth-token: ${{ secrets.API_TOKEN }}
+      license-key: ${{ secrets.SCANNER_LICENSE_KEY }} # Unlocks Auto-PR & Stateful BOLA
+      auto-pr: true                                   # Opens automated PRs with remediations
+      fail-on: high
+      html-output: scan-report.html
+      sarif-output: scan-report.sarif
+
+  # 1. Downloadable Interactive HTML & SARIF Reports on Actions Run page
+  - name: Upload Security Reports as Artifacts
+    uses: actions/upload-artifact@v4
+    if: always()
+    with:
+      name: api-security-reports
+      path: |
+        scan-report.html
+        scan-report.sarif
+      retention-days: 30
+
+  # 2. Publish alerts directly to GitHub 'Security -> Code scanning' Tab
+  - name: Upload to GitHub Security Tab
+    uses: github/codeql-action/upload-sarif@v3
+    if: always()
+    with:
+      sarif_file: scan-report.sarif
 ```
 
 ### 3. Launch Local Web Portal & Billing Server

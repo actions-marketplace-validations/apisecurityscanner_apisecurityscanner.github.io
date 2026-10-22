@@ -194,11 +194,9 @@ public class LicenseValidator {
 
         // Enforce Auto-PR requirement
         if (autoPr && !status.isFeatureAllowed("AUTO_PR_BOT")) {
-            throw new IllegalArgumentException(String.format(
-                    "[LICENSE RESTRICTION] The '--auto-pr' (Zero-Click AI PR Auto-Fix) feature requires a Pro or Enterprise plan.%n" +
-                    "Current active plan: %s. Upgrade your license at https://scanner.dev/pricing",
-                    status.tier()
-            ));
+            System.out.println("⚠️  [LICENSE NOTICE] The '--auto-pr' (Zero-Click AI PR Auto-Fix) feature requires a Pro or Enterprise plan.");
+            System.out.printf("   Active plan: %s. Auto-PR will be skipped for this run; scanning, SARIF export, and HTML reports will proceed normally.%n", status.tier());
+            System.out.println("   💡 To activate Auto-PR, pass a valid Pro license key (--license-key) or set SCANNER_LICENSE_KEY secret.");
         }
 
         // Dual-role BOLA notice

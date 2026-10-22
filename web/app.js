@@ -1088,7 +1088,17 @@ jobs:
     if (isAutoPr) yaml += `\n          auto-pr: 'true'\n          github-token: \${{ secrets.GITHUB_TOKEN }}`;
     if (isAirGapped) yaml += `\n          air-gapped: 'true'`;
 
-    yaml += `\n\n      - name: Upload Security SARIF to GitHub Code Scanning
+    yaml += `\n\n      - name: Upload Security Reports as Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: api-security-reports
+          path: |
+            reports/security-dashboard.html
+            reports/scan-report.sarif
+          retention-days: 30
+
+      - name: Upload Security SARIF to GitHub Code Scanning
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
